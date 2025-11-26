@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ऑनलाइन बाज़ार - Online Bazaar</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Outfit', sans-serif; background-color: #f8fafc; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        .chat-box { height: 250px; }
+        .fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, addDoc, onSnapshot, collection, query, serverTimestamp, orderBy, updateDoc, where } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+        // ==========================================
+        // 👇 CONFIGURATION SETUP (Hybrid) 👇
+        // ==========================================
+        
+        // 1. GitHub/Live ke liye: Yahan apni asli keys daalein
+        // Jab aap GitHub par dalein, to is object ko bharein
+        const manualConfig = {
+            apiKey: "", 
+            authDomain: "",
+            projectId: "",
+            storageBucket: "",
+            messagingSenderId: "",
+            appId: ""
+        };
+
+        // 2. Logic to choose config
+        let firebaseConfig;
+        let initialAuthToken = null;
+        let appId = 'my-shop-v1';
+
+        // Check if running in the AI Preview Environment
+        if (typeof __firebase_config !== 'undefined') {
+            // Use internal config for Preview
+            firebaseConfig = JSON.parse(__firebase_config);
+            if (typeof __app_id !== 'undefined') appId = __app_id;
+            if (typeof __initial_auth_token !== 'undefined') initialAuthToken = __initial_auth_token;
+            console.log("Using Preview Config");
+        } else {
+            // Use manual config for GitHub/Live
+            firebaseConfig = manualConfig;
+            console.log("Using Manual Config");
+        }
+
+        // ==========================================
+        
+        // Safety Check for "projectId" error
+        if (!firebaseConfig || !firebaseConfig.projectId) {
+            console.error("Firebase Config Error: projectId missing.");
+            document.body.innerHTML = `
+                <div style="display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;text-align:center;padding:20px;">
+                    <h1 style="color:red;font-size:24px;font-weight:bold;">Configuration Error</h1>
+                    <p>App ko <b>Project ID</b> nahi mili.</p>
+                    <p style="background:#eee;padding:10px;border-radius:8px;margin-top:10px;">
+                        Agar aap ise <b>GitHub</b> par chala rahe hain:<br>
+                        Code mein <code>manualConfig</code> ke andar apni Firebase details bharein.
+                    </p>
+                </div>
+            `;
+            throw new Error("projectId not provided");
+        }
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        let userId = null;
+        let userName = null;
+        let userProfile = {};
+        let tempMobileNumber = "";
+
+        // --- INIT ---
+        window.initApp = async () => {
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    await checkUserProfile(userId);
+                } else {
+                    // Auth Flow
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                }
+            });
+        };
+
+        const checkUserProfile = async (uid) => {
+            try {
+                // Use consistent path structure for both environments
+                // Note: For GitHub live, make sure your Firestore rules allow access to 'users' collection
+                // or change this path to match your rules.
+                const userPath = typeof __firebase_config !== 'undefined' ? 
+                    ['artifacts', appId, 'users', uid, 'profile', 'data'] : // Preview Path
+                    ['users', uid]; // Live Path (simpler)
+
+                // Helper to get doc ref based on path array
+                const getRef = (pathArr) => {
+                   if(pathArr.length > 2) return doc(db, ...pathArr);
+                   return doc(db, pathArr[0], pathArr[1]);
+                };
+
+                const docSnap = await getDoc(getRef(userPath));
+                
+                if (docSnap.exists()) {
+                    userProfile = docSnap.data();
+                    userName = userProfile.name;
+                    showView('view-home');
+                    startItemsListener();
+                    updateUserDisplay();
+                } else {
+                    showView('view-login-mobile');
+                }
+            } catch (e) { 
+                console.error("Profile Load Error:", e);
+                // Fallback if permission error occurs (often happens if rules aren't set)
+                showView('view-login-mobile');
+            }
+        };
+
+        const updateUserDisplay = () => {
+            document.querySelectorAll('.user-name-display').forEach(el => el.textContent = userName || 'Guest');
+            document.querySelectorAll('.user-photo-display').forEach(img => img.src = userProfile.photo || 'https://placehold.co/100');
+        };
+
+        // --- HELPER FOR COLLECTIONS (Handles Paths) ---
+        const getCollectionRef = (colName) => {
+             if (typeof __firebase_config !== 'undefined') {
+                 // Preview Path
+                 return collection(db, 'artifacts', appId, 'public', 'data', colName);
+             } else {
+                 // Live Path
+                 return collection(db, colName);
+             }
+        };
+
+        const getUserDocRef = () => {
+            if (typeof __firebase_config !== 'undefined') {
+                 return doc(db, 'artifacts', appId, 'users', userId, 'profile', 'data');
+            } else {
+                 return doc(db, 'users', userId);
+            }
+        };
+
+
+        // --- LOGIN & OTP SIMULATION ---
+        window.sendOtp = () => {
+            const mobile = document.getElementById('login-mobile').value.trim();
+            if (mobile.length !== 10) { showToast('10 अंकों का नंबर डालें', 'error'); return; }
+            tempMobileNumber = mobile;
+            showToast(`OTP sent to ${mobile}`, 'success');
+            showView('view-login-otp');
+        };
+
+        window.verifyOtp = () => {
+            const otp = document.getElementById('login-otp').value.trim();
+            if (otp.length < 4) { showToast('Try 1234', 'error'); return; }
+            document.getElementById('reg-mobile').value = tempMobileNumber;
+            showView('view-register-profile');
+        };
+
+        window.saveProfile = async () => {
+            const name = document.getElementById('reg-name').value.trim();
+            const address = document.getElementById('reg-address').value.trim();
+            const mobile = document.getElementById('reg-mobile').value.trim();
+            const file = document.getElementById('reg-photo').files[0];
+
+            if (!name || !address) { showToast('नाम और पता भरें', 'error'); return; }
+
+            let photoBase64 = null;
+            if (file) {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                await new Promise(resolve => reader.onload = () => { photoBase64 = reader.result; resolve(); });
+            }
+
+            try {
+                await setDoc(getUserDocRef(), {
+                    name, address, mobile, photo: photoBase64,
+                    joinedAt: serverTimestamp()
+                }, { merge: true });
+
+                userProfile = { name, address, mobile, photo: photoBase64 };
+                userName = name;
+                updateUserDisplay();
+                showView('view-home');
+                startItemsListener();
+            } catch(e) { console.error(e); showToast('Error saving profile', 'error'); }
+        };
+
+        // --- TABS & LISTENERS ---
+        window.switchHomeTab = (tab) => {
+            document.getElementById('tab-items').classList.remove('text-indigo-600', 'border-b-2', 'border-indigo-600');
+            document.getElementById('tab-requests').classList.remove('text-indigo-600', 'border-b-2', 'border-indigo-600');
+            document.getElementById(`tab-${tab}`).classList.add('text-indigo-600', 'border-b-2', 'border-indigo-600');
+            if(tab === 'items') startItemsListener();
+            else startRequestsListener();
+        };
+
+        const startItemsListener = () => {
+            const q = query(getCollectionRef('items'), orderBy('createdAt', 'desc'));
+            onSnapshot(q, (snap) => {
+                const list = document.getElementById('items-grid');
+                list.innerHTML = '';
+                if(snap.empty) { list.innerHTML = '<p class="col-span-full text-center text-gray-400 py-10">कोई सामान नहीं है</p>'; return; }
+                
+                snap.forEach(d => {
+                    const item = d.data();
+                    if (item.status !== 'sold') {
+                        const el = document.createElement('div');
+                        el.className = 'bg-white rounded-2xl shadow-sm hover:shadow-lg transition overflow-hidden border border-gray-100 cursor-pointer';
+                        el.onclick = (e) => { if(!e.target.closest('button')) showItemDetails(d.id, item.sellerId); };
+                        el.innerHTML = `
+                            <div class="relative h-48 overflow-hidden">
+                                <img src="${item.imageData}" class="w-full h-full object-cover" alt="${item.name}">
+                                <div class="absolute bottom-0 w-full bg-gradient-to-t from-black/70 to-transparent p-3">
+                                    <span class="text-white font-bold text-lg">₹ ${item.price}</span>
+                                </div>
+                            </div>
+                            <div class="p-4">
+                                <h3 class="font-bold text-gray-800 truncate">${item.name}</h3>
+                                <p class="text-xs text-gray-500 mb-2">${item.category}</p>
+                                <div class="flex justify-between items-center mt-2">
+                                    <span class="text-xs text-gray-400">By: ${item.sellerName.split(' ')[0]}</span>
+                                    <button class="bg-indigo-50 text-indigo-600 px-3 py-1 rounded-full text-xs font-bold">खरीदें</button>
+                                </div>
+                            </div>`;
+                        list.appendChild(el);
+                    }
+                });
+            });
+        };
+
+        const startRequestsListener = () => {
+            const q = query(getCollectionRef('requests'), orderBy('createdAt', 'desc'));
+            onSnapshot(q, (snap) => {
+                const list = document.getElementById('items-grid');
+                list.innerHTML = '';
+                if(snap.empty) { list.innerHTML = '<p class="col-span-full text-center text-gray-400 py-10">कोई मांग नहीं है</p>'; return; }
+                snap.forEach(d => {
+                    const req = d.data();
+                    const el = document.createElement('div');
+                    el.className = 'bg-white rounded-2xl p-5 shadow-sm border border-orange-100 relative';
+                    el.innerHTML = `
+                        <div class="absolute top-0 right-0 bg-orange-100 text-orange-600 text-xs px-2 py-1 rounded-bl-xl font-bold">WANTED</div>
+                        <h3 class="font-bold text-lg text-gray-800">${req.itemName}</h3>
+                        <p class="text-gray-600 text-sm mt-1">${req.description}</p>
+                        <div class="flex items-center gap-2 mt-4 pt-3 border-t border-gray-50">
+                            <img src="${req.requesterPhoto || 'https://placehold.co/50'}" class="w-8 h-8 rounded-full object-cover">
+                            <div class="text-xs">
+                                <p class="font-bold">${req.requesterName}</p>
+                                <p class="text-gray-400">को चाहिए</p>
+                            </div>
+                        </div>`;
+                    list.appendChild(el);
+                });
+            });
+        };
+
+        // --- SUBMIT ACTIONS ---
+        window.submitSell = async (e) => {
+            e.preventDefault();
+            const form = document.getElementById('form-sell');
+            const file = document.getElementById('inp-file').files[0];
+            if(!file) { showToast('फोटो ज़रूरी है', 'error'); return; }
+
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = async () => {
+                await addDoc(getCollectionRef('items'), {
+                    name: form['name'].value, price: Number(form['price'].value),
+                    category: form['category'].value, description: form['desc'].value,
+                    imageData: reader.result, sellerId: userId, sellerName: userName, sellerPhoto: userProfile.photo,
+                    status: 'available', createdAt: serverTimestamp()
+                });
+                showToast('विज्ञापन लाइव है!', 'success');
+                form.reset();
+                showView('view-home');
+                switchHomeTab('items');
+            };
+        };
+
+        window.submitRequest = async (e) => {
+            e.preventDefault();
+            const name = document.getElementById('req-name').value;
+            const desc = document.getElementById('req-desc').value;
+            await addDoc(getCollectionRef('requests'), {
+                itemName: name, description: desc,
+                requesterId: userId, requesterName: userName, requesterPhoto: userProfile.photo,
+                createdAt: serverTimestamp()
+            });
+            showToast('मांग पोस्ट की गई!', 'success');
+            document.getElementById('form-request').reset();
+            showView('view-home');
+            switchHomeTab('requests');
+        };
+
+        // --- DEALS & CHATS ---
+        let dealsUnsub;
+        window.showItemDetails = async (itemId, sellerId) => {
+            let seller = {name:'Unknown', mobile:'Hidden', address:'Hidden', photo: ''};
+            
+            try {
+                const itemSnap = await getDoc(doc(getCollectionRef('items'), itemId));
+                if(!itemSnap.exists()) return;
+                const item = itemSnap.data();
+
+                // Fetch Seller
+                // We need to construct seller path correctly based on env
+                let sellerRef;
+                if(typeof __firebase_config !== 'undefined') {
+                    sellerRef = doc(db, 'artifacts', appId, 'users', sellerId, 'profile', 'data');
+                } else {
+                    sellerRef = doc(db, 'users', sellerId);
+                }
+                const sellerSnap = await getDoc(sellerRef);
+                if(sellerSnap.exists()) seller = sellerSnap.data();
+
+                document.getElementById('det-img').src = item.imageData;
+                document.getElementById('det-title').innerText = item.name;
+                document.getElementById('det-price').innerText = `₹ ${item.price}`;
+                document.getElementById('det-seller-photo').src = seller.photo || 'https://placehold.co/100';
+                document.getElementById('det-seller-name').innerText = seller.name;
+                document.getElementById('det-seller-mobile').innerText = seller.mobile;
+                document.getElementById('chat-item-id').value = itemId;
+
+                // Deals Logic
+                const controls = document.getElementById('deal-controls');
+                controls.innerHTML = '';
+                
+                if(dealsUnsub) dealsUnsub();
+                const q = query(getCollectionRef('deals'), where('itemId', '==', itemId));
+                
+                dealsUnsub = onSnapshot(q, (snap) => {
+                    if (sellerId === userId) {
+                        controls.innerHTML = '<h3 class="font-bold mb-2">खरीदने की रिक्वेस्ट:</h3>';
+                        if(snap.empty) controls.innerHTML += '<p class="text-sm text-gray-500">कोई रिक्वेस्ट नहीं।</p>';
+                        snap.forEach(d => {
+                            const deal = d.data();
+                            if(deal.status === 'pending') {
+                                controls.innerHTML += `
+                                <div class="bg-slate-50 p-3 rounded border mb-2">
+                                    <p class="font-bold text-sm">${deal.buyerName}</p>
+                                    <button onclick="acceptDeal('${d.id}')" class="bg-green-600 text-white px-2 py-1 rounded text-xs mt-1">Accept</button>
+                                </div>`;
+                            } else if(deal.status === 'accepted') {
+                                controls.innerHTML += `<div class="text-green-600 text-xs font-bold mt-1">Deal Accepted with ${deal.buyerName}</div>`;
+                            }
+                        });
+                    } else {
+                        const myDeal = snap.docs.find(d => d.data().buyerId === userId);
+                        if (!myDeal) {
+                            controls.innerHTML = `<button onclick="sendDealRequest('${itemId}')" class="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold">Yes, I want to buy</button>`;
+                        } else {
+                            const status = myDeal.data().status;
+                            if(status === 'pending') controls.innerHTML = `<div class="bg-yellow-100 p-3 rounded text-center">Pending Approval</div>`;
+                            else if(status === 'accepted') controls.innerHTML = `<div class="bg-green-100 p-3 rounded text-center font-bold">Deal Confirmed!<br>${myDeal.data().meetTime} @ ${myDeal.data().meetPlace}</div>`;
+                        }
+                    }
+                });
+
+                setupChat(itemId);
+                showView('view-details');
+            } catch(e) { console.error("Error showing details", e); }
+        };
+
+        window.sendDealRequest = async (itemId) => {
+            await addDoc(getCollectionRef('deals'), {
+                itemId, buyerId: userId, buyerName: userName, status: 'pending', createdAt: serverTimestamp()
+            });
+        };
+
+        window.acceptDeal = (dealId) => {
+            document.getElementById('modal-deal-id').value = dealId;
+            document.getElementById('modal-logistics').classList.remove('hidden');
+        };
+
+        window.confirmDeal = async () => {
+            const dealId = document.getElementById('modal-deal-id').value;
+            const time = document.getElementById('deal-time').value;
+            const place = document.getElementById('deal-place').value;
+            if(!time || !place) return;
+            // Note: In Preview we have nested paths, in Live simpler paths.
+            // But getCollectionRef handles 'deals' collection
+            // updateDoc needs a direct ref.
+            // For simplicity we fetch the ref using the same logic.
+            const colRef = getCollectionRef('deals');
+            await updateDoc(doc(colRef, dealId), { status: 'accepted', meetTime: time, meetPlace: place });
+            document.getElementById('modal-logistics').classList.add('hidden');
+        };
+
+        const setupChat = (itemId) => {
+            const chatDiv = document.getElementById('chat-messages');
+            // Path handling for chat subcollection is tricky in hybrid mode
+            // Preview: artifacts/../chats/ITEMID/messages
+            // Live: chats/ITEMID/messages
+            let chatRef;
+            if(typeof __firebase_config !== 'undefined') {
+                 chatRef = collection(db, 'artifacts', appId, 'public', 'data', 'chats', itemId, 'messages');
+            } else {
+                 chatRef = collection(db, 'chats', itemId, 'messages');
+            }
+
+            const q = query(chatRef, orderBy('createdAt', 'asc'));
+            onSnapshot(q, (snap) => {
+                chatDiv.innerHTML = '';
+                snap.forEach(d => {
+                    const msg = d.data();
+                    const isMe = msg.senderId === userId;
+                    chatDiv.innerHTML += `<div class="flex w-full ${isMe ? 'justify-end' : 'justify-start'} mb-2">
+                        <div class="px-3 py-1.5 rounded-2xl text-xs ${isMe ? 'bg-indigo-600 text-white' : 'bg-white border'}">${msg.text}</div></div>`;
+                });
+                chatDiv.scrollTop = chatDiv.scrollHeight;
+            });
+        };
+
+        window.sendChat = async (e) => {
+            e.preventDefault();
+            const txt = document.getElementById('inp-chat').value.trim();
+            const itemId = document.getElementById('chat-item-id').value;
+            if(!txt) return;
+
+            let chatRef;
+            if(typeof __firebase_config !== 'undefined') {
+                 chatRef = collection(db, 'artifacts', appId, 'public', 'data', 'chats', itemId, 'messages');
+            } else {
+                 chatRef = collection(db, 'chats', itemId, 'messages');
+            }
+
+            await addDoc(chatRef, { text: txt, senderId: userId, createdAt: serverTimestamp() });
+            document.getElementById('inp-chat').value = '';
+        };
+
+        window.showFullProfile = () => {
+             document.getElementById('prof-img').src = userProfile.photo || 'https://placehold.co/150';
+             document.getElementById('prof-name').innerText = userProfile.name;
+             document.getElementById('prof-mobile').innerText = userProfile.mobile;
+             document.getElementById('prof-address').innerText = userProfile.address;
+             showView('view-profile-full');
+        };
+
+        window.showView = (id) => {
+            document.querySelectorAll('.app-view').forEach(el => el.classList.add('hidden'));
+            document.getElementById(id).classList.remove('hidden');
+            window.scrollTo(0,0);
+        };
+
+        window.showToast = (msg, type) => {
+            const t = document.getElementById('toast');
+            t.innerHTML = `<div class="${type==='error'?'bg-red-500':'bg-green-500'} text-white px-4 py-2 rounded shadow">${msg}</div>`;
+            t.classList.remove('translate-y-20', 'opacity-0');
+            setTimeout(() => t.classList.add('translate-y-20', 'opacity-0'), 3000);
+        };
+
+        window.onload = initApp;
+    </script>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen relative pb-20 md:pb-0">
+
+    <div id="toast" class="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 transition-all duration-500 translate-y-20 opacity-0"></div>
+
+    <!-- MODAL -->
+    <div id="modal-logistics" class="fixed inset-0 bg-black/50 z-[60] hidden flex items-center justify-center p-4">
+        <div class="bg-white p-6 rounded-2xl w-full max-w-sm shadow-2xl">
+            <h3 class="font-bold text-lg mb-4">Deal Confirm</h3>
+            <input type="hidden" id="modal-deal-id">
+            <input id="deal-time" class="w-full p-2 border rounded-lg mb-2" placeholder="Date & Time">
+            <input id="deal-place" class="w-full p-2 border rounded-lg mb-4" placeholder="Location">
+            <div class="flex gap-2">
+                <button onclick="document.getElementById('modal-logistics').classList.add('hidden')" class="flex-1 py-2 bg-gray-200 rounded-lg">Cancel</button>
+                <button onclick="confirmDeal()" class="flex-1 py-2 bg-green-600 text-white rounded-lg">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- VIEW 1: LOGIN -->
+    <div id="view-login-mobile" class="app-view hidden min-h-screen flex flex-col items-center justify-center p-6 bg-white">
+        <h1 class="text-3xl font-bold text-slate-900 mb-8">Bazaar Login</h1>
+        <div class="w-full max-w-sm space-y-4">
+            <input id="login-mobile" type="tel" class="w-full p-4 border rounded-xl text-lg bg-slate-50" placeholder="Mobile Number">
+            <button onclick="sendOtp()" class="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold">Get OTP</button>
+        </div>
+    </div>
+
+    <!-- VIEW 2: OTP -->
+    <div id="view-login-otp" class="app-view hidden min-h-screen flex flex-col items-center justify-center p-6 bg-white">
+        <h2 class="text-2xl font-bold mb-4">Enter OTP</h2>
+        <input id="login-otp" type="number" class="w-full max-w-sm p-4 border rounded-xl text-center text-2xl tracking-widest mb-4" placeholder="1234">
+        <button onclick="verifyOtp()" class="w-full max-w-sm bg-indigo-600 text-white py-4 rounded-xl font-bold">Verify</button>
+    </div>
+
+    <!-- VIEW 3: REGISTER -->
+    <div id="view-register-profile" class="app-view hidden min-h-screen p-6 bg-white flex flex-col justify-center">
+        <h2 class="text-2xl font-bold mb-6">Create Profile</h2>
+        <div class="max-w-sm mx-auto w-full space-y-4">
+            <div class="flex justify-center mb-4">
+                <div class="w-24 h-24 bg-slate-100 rounded-full overflow-hidden border-2 border-dashed border-indigo-300 relative">
+                    <input id="reg-photo" type="file" class="absolute inset-0 opacity-0 z-10">
+                    <div class="absolute inset-0 flex items-center justify-center text-xs text-gray-400">Add Photo</div>
+                </div>
+            </div>
+            <input id="reg-name" class="w-full p-3 border rounded-xl" placeholder="Full Name">
+            <input id="reg-mobile" type="text" disabled class="w-full p-3 bg-slate-100 rounded-xl text-gray-500">
+            <textarea id="reg-address" class="w-full p-3 border rounded-xl" placeholder="Address"></textarea>
+            <button onclick="saveProfile()" class="w-full bg-green-600 text-white py-3 rounded-xl font-bold">Save</button>
+        </div>
+    </div>
+
+    <!-- VIEW 4: HOME -->
+    <div id="view-home" class="app-view hidden">
+        <nav class="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b flex justify-between items-center px-4 h-16">
+            <div class="font-bold text-xl text-indigo-600">Bazaar</div>
+            <div onclick="showFullProfile()" class="flex items-center gap-2 cursor-pointer bg-slate-100 py-1 px-3 rounded-full">
+                <img class="w-8 h-8 rounded-full object-cover user-photo-display" src="">
+                <span class="text-sm font-bold user-name-display">User</span>
+            </div>
+        </nav>
+        <div class="flex border-b bg-white sticky top-16 z-30">
+            <button id="tab-items" onclick="switchHomeTab('items')" class="flex-1 py-3 font-bold text-indigo-600 border-b-2 border-indigo-600 transition">बाज़ार (Items)</button>
+            <button id="tab-requests" onclick="switchHomeTab('requests')" class="flex-1 py-3 font-bold text-gray-400 transition">मांग (Requests)</button>
+        </div>
+        <main class="max-w-5xl mx-auto px-4 py-6 pb-24">
+            <div id="items-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+        </main>
+        <div class="fixed bottom-20 right-6 flex flex-col gap-3 z-30">
+            <button onclick="showView('view-request-add')" class="w-12 h-12 bg-orange-500 text-white rounded-full shadow-lg flex items-center justify-center">📢</button>
+            <button onclick="showView('view-sell')" class="w-14 h-14 bg-indigo-600 text-white rounded-full shadow-lg flex items-center justify-center">➕</button>
+        </div>
+    </div>
+
+    <!-- VIEW 5: SELL -->
+    <div id="view-sell" class="app-view hidden bg-white min-h-screen">
+        <div class="p-4 border-b flex items-center gap-4">
+            <button onclick="showView('view-home')">Back</button>
+            <h2 class="font-bold text-xl">Sell</h2>
+        </div>
+        <div class="p-6 max-w-lg mx-auto">
+            <form id="form-sell" onsubmit="submitSell(event)" class="space-y-4">
+                <input id="inp-file" type="file" class="w-full">
+                <input name="name" class="w-full p-3 bg-slate-50 rounded-xl border" placeholder="Product Name" required>
+                <div class="flex gap-4">
+                    <input name="price" type="number" class="w-1/2 p-3 bg-slate-50 rounded-xl border" placeholder="Price ₹" required>
+                    <input name="category" class="w-1/2 p-3 bg-slate-50 rounded-xl border" placeholder="Category" required>
+                </div>
+                <textarea name="desc" class="w-full p-3 bg-slate-50 rounded-xl border" placeholder="Details..."></textarea>
+                <button class="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl">Post Ad</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- VIEW 6: REQUEST ADD -->
+    <div id="view-request-add" class="app-view hidden bg-white min-h-screen">
+        <div class="p-4 border-b flex items-center gap-4">
+            <button onclick="showView('view-home')">Back</button>
+            <h2 class="font-bold text-xl">Request Item</h2>
+        </div>
+        <div class="p-6 max-w-lg mx-auto">
+            <form id="form-request" onsubmit="submitRequest(event)" class="space-y-4">
+                <input id="req-name" class="w-full p-3 bg-slate-50 rounded-xl border" placeholder="Item Name" required>
+                <textarea id="req-desc" class="w-full p-3 bg-slate-50 rounded-xl border" placeholder="Description" required></textarea>
+                <button class="w-full py-3 bg-orange-500 text-white font-bold rounded-xl">Post Request</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- VIEW 7: FULL PROFILE -->
+    <div id="view-profile-full" class="app-view hidden bg-white min-h-screen">
+        <div class="bg-indigo-600 p-6 text-white pt-10 pb-16 relative">
+            <button onclick="showView('view-home')" class="absolute top-4 left-4 bg-white/20 p-2 rounded-full">Back</button>
+            <div class="flex flex-col items-center">
+                <img id="prof-img" class="w-24 h-24 rounded-full border-4 border-white bg-white object-cover shadow-lg mb-3" src="">
+                <h2 id="prof-name" class="text-2xl font-bold">User</h2>
+                <p id="prof-mobile" class="text-indigo-100">Mobile</p>
+            </div>
+        </div>
+        <div class="max-w-3xl mx-auto px-6 -mt-10">
+            <div class="bg-white rounded-xl shadow-lg p-6 mb-6 border border-gray-100">
+                <p id="prof-address" class="text-gray-800 font-medium">Address...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- VIEW 8: DETAILS -->
+    <div id="view-details" class="app-view hidden bg-white min-h-screen pb-20">
+        <div class="relative h-64 bg-black">
+            <img id="det-img" class="w-full h-full object-cover opacity-80">
+            <button onclick="showView('view-home')" class="absolute top-4 left-4 bg-white/30 p-2 rounded-full text-white backdrop-blur">Back</button>
+        </div>
+        <div class="max-w-3xl mx-auto p-6 -mt-6 bg-white rounded-t-3xl relative z-10 shadow-xl">
+            <h2 id="det-title" class="text-2xl font-bold">Title</h2>
+            <p id="det-price" class="text-xl font-bold text-indigo-600 mb-4">₹0</p>
+            <div class="flex items-center gap-3 bg-slate-50 p-4 rounded-xl border border-slate-100 mb-6">
+                <img id="det-seller-photo" class="w-12 h-12 rounded-full object-cover bg-white border">
+                <div>
+                    <p id="det-seller-name" class="font-bold text-sm">Name</p>
+                    <p id="det-seller-mobile" class="text-xs text-gray-500">Mobile</p>
+                </div>
+            </div>
+            <div id="deal-controls" class="mb-8 p-4 border-2 border-indigo-50 rounded-xl"></div>
+            <div id="chat-messages" class="chat-box bg-slate-50 rounded-xl border p-3 mb-3 overflow-y-auto"></div>
+            <form onsubmit="sendChat(event)" class="flex gap-2">
+                <input type="hidden" id="chat-item-id">
+                <input id="inp-chat" class="flex-1 p-3 border rounded-xl" placeholder="Message...">
+                <button class="bg-indigo-600 text-white px-4 rounded-xl">Send</button>
+            </form>
+        </div>
+    </div>
+
+</body>
+</html>
